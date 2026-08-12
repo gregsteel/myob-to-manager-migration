@@ -56,15 +56,18 @@ Trial Balance — lives in the sibling **`manager-automation`** skill.
 Typical local path: `.cursor/skills/manager-automation` (symlinked into
 `.claude/skills/` the same way). Read its `SKILL.md` first if you haven't.
 
-**Writes (creates/updates):** project apply runner (loads `.env` itself):
-
-```bash
-python3 scripts/apply_manager_api.py --dry-run out/manager/some_file.tsv
-python3 scripts/apply_manager_api.py out/manager/some_file.tsv
-```
-
-Do not reimplement the CLI. Do not paste Batch Create/Update in the UI unless API
-apply fails.
+**Writes (creates/updates):** `apply_manager_api.py`, referenced below and
+elsewhere in this skill's older docs, **does not exist in any project using
+this skill** — confirmed by a full git-history search 2026-08-12; it was
+removed in an early cleanup pass and never rebuilt. Treat every mention of
+it in this skill as historical/aspirational, not a real tool to reach for.
+The actual live pattern is **direct `lib_manager_api.ManagerAPI` calls**
+(`post_form`/`get_form`/`put_form`) written per-script — see
+`scripts/fix_general_journal_gaps.py`, `scripts/build_director_clearing_journals.py`,
+and, for the fullest worked example (dedup + create + link + verify, all
+built on this same pattern), [reference/delta-migration.md](reference/delta-migration.md)'s
+`myob_delta/` scripts. Do not paste Batch Create/Update in the UI unless
+direct API calls fail for a specific reason worth documenting.
 
 ## Read first (progressive disclosure — all inside this skill)
 
@@ -74,6 +77,7 @@ apply fails.
 | [reference/manager-import.md](reference/manager-import.md) | Load into Manager (COA, bank, PIs, API apply) |
 | [reference/receipts.md](reference/receipts.md) | Bill/receipt harvest + image attach |
 | [reference/live-trial-balance.md](reference/live-trial-balance.md) | Reconciling a live Manager instance against MYOB export data |
+| [reference/delta-migration.md](reference/delta-migration.md) | Side-by-side operation: on-demand delta harvest+apply (Bills/Invoices/Journals) once MYOB is no longer the sole system of record, MYOB session-fragility handling, the Journal-entries report export sequence |
 | [specs/](specs/README.md) | MYOB export/harvest format facts (protobuf COA map, BFF, journal-as-dictionary) |
 
 **Instance-only** (this company's open gaps / choices): project `docs/`
@@ -129,6 +133,10 @@ See `manager-automation`'s own Golden Rules for everything about safe Manager AP
 - **MYOB Trial balance** (Business Lite): no Cash/Accrual toggle; period is a **month** picker → treat as **month-end** (Jun 2026 ⇒ 30/06/2026).
 - Not every MYOB `Bank`-typed account is a real bank account — see [reference/manager-import.md](reference/manager-import.md) §1.
 - **A MYOB Bill's Issue Date can be genuinely mistyped years into the past** (a real, editable field error, confirmed via MYOB's own bill-edit screen — not a display artifact of anything else). MYOB's own harvested `payment_term.days` field (`InAGivenNumberOfDays`) is an honest record of `due_date − issue_date` at entry time, so an absurd value (hundreds to thousands of days) is a symptom worth investigating — but per Golden rule 8, it is *only* a symptom; confirm against the GL export and, if available, a real filed P&L before concluding the date is actually wrong. MYOB's own UI surfaces a banner on such bills — "Bills dated before your opening balance month will not automatically update account balances" — meaning a bill accidentally dated before MYOB's opening balance month may never flow into the normal ledger at all unless someone manually adds it to the opening balance; that manual step not happening is a plausible reason a real bill ends up genuinely absent from every `journal_entries_FY*.xlsx` export.
+- **MYOB “End of Year Adjustment” (`Dr 3-1800` / `Cr 3-1600`, dated 1 July) is an equity-only shuffle, not the accountant’s adjusting journals.** Real EOY take-ups (BAS clearing, book depreciation, FBT instalment → expense, income-tax provision, HP interest) are separate General Journals, usually dated 30 June (FBT often early July because the FBT year ends 31 March). Don’t treat the equity shuffle as evidence those adjusting journals were done — and when rebuilding close in Manager, zeroing real P&L accounts into `3-1800` is a different step from either.
+- **A saved MYOB Playwright session can expire within about a minute of a fresh script start**, confirmed repeatedly on one real business (not a one-off flake — happened five times in a row, including once mid-script between two sequential UI actions). Harvesting cannot be a single unattended command as a result: `login` may be needed immediately before *each* harvest run, not once per day/week. See [reference/delta-migration.md](reference/delta-migration.md) for the non-interactive session-validity check and the "do the whole flow in one continuous run" mitigation.
+- **MYOB's Journal entries report defaults to collapsed (no account detail) even when its own Customise dialog already lists the right expanded columns** — Customise's Apply button only configures *which* columns would show in expanded view, not whether the report is in that view. The actual toggle is a separate "Expand all" button. Full click-by-click sequence (including that Export reveals an Excel/PDF choice rather than downloading immediately): [reference/delta-migration.md](reference/delta-migration.md).
+- **A correction/dedup script that resolves a MYOB number to a live Manager record must iterate per-source-row (number *and* issue_date together), never collapse to a bare-number-keyed dict** — recycled MYOB numbers aren't just a historical-import risk, a naive lookup during a *new* script's own development pointed a correction at a completely unrelated historical record sharing the same bare number. Caught in dry-run, not by the lookup logic itself. See [reference/delta-migration.md](reference/delta-migration.md) for the incident and the belt-and-braces reference-match guard that now guards against it.
 
 See [reference/invoice-linking.md](../manager-automation/reference/invoice-linking.md) (manager-automation) for everything about how Manager applies Payments/Receipts/Journals to invoices — the payment-reference join technique used throughout this skill's AP-linking scripts is documented there.
 
@@ -140,7 +148,7 @@ Task Progress:
 - [ ] 2. validate_categories → build COA / opening / journals / contacts
 - [ ] 3. reconcile_trial_balance (+ reconcile_pl) — exact match required
 - [ ] 4. manager-import: seed COA → bank + start bal → PIs + images → bank feed
-- [ ] 5. Bank categorization from harvest + journals / §6a → apply_manager_api.py
+- [ ] 5. Bank categorization from harvest + journals / §6a → direct `lib_manager_api` writes (see "Apply runner" below)
 - [ ] 6. Spot-check with manager CLI; update config/pending_pastes.tsv
 - [ ] 7. reconcile_manager_to_myob.py (--live-api for a quick check first); triage instance docs/MIGRATION_DIFFS.md
 ```
@@ -149,16 +157,31 @@ Dry run: use `samples/` when `exports/myob/` is empty — see project README.
 
 ## Apply runner
 
+There is no generic TSV-apply runner (`apply_manager_api.py` — see the
+"Dependency: manager-automation" section above for why not). Writes are
+direct `lib_manager_api.ManagerAPI` calls, one script per concern. For the
+delta-migration case (side-by-side operation, catching Manager up on what's
+new in MYOB), the ready-made pipeline is:
+
 ```bash
-python3 scripts/apply_manager_api.py --dry-run out/manager/<file>.tsv
-python3 scripts/apply_manager_api.py out/manager/<file>.tsv
-python3 scripts/apply_manager_api.py --limit 5 --continue-on-error out/manager/<file>.tsv
+python3 scripts/myob_delta/filter_delta.py                    # read-only: what's new
+python3 scripts/myob_delta/delta_migrate.py                   # dry-run everything
+python3 scripts/myob_delta/delta_migrate.py --apply            # real writes, snapshots first
 ```
+
+See [reference/delta-migration.md](reference/delta-migration.md) for the
+full architecture, the MYOB-harvest prerequisite (manual, human-run —
+session fragility means it can't be scripted end-to-end), and per-project
+config these scripts expect (`config/myob_business_id.txt` etc.).
 
 Client: `../manager-automation/scripts/lib_manager_api.py`. Logs: `out/manager/apply_log_*.tsv`.
 Skill-local, canonical scripts: [`scripts/`](scripts/) — `lib_xlsx.py`,
 `build_journals.py`, `audit_account_vs_myob.py`, `audit_ar_receipts_vs_myob.py`,
-`audit_post_migration_date.py`
+`audit_post_migration_date.py`, and two subdirectories for the delta-migration
+pipeline: `myob_playwright/` (`download_bills.py`, `download_invoices.py`,
+`download_journals.py`, `manager_index.py`) and `myob_delta/` (`filter_delta.py`,
+`apply_bills_invoices.py`, `link_payments.py`, `apply_journals.py`,
+`delta_migrate.py`)
 — the MYOB-comparison-specific tools that don't belong in
 `manager-automation` (which holds the pure-Manager helpers this skill
 depends on: `lib_manager_api.py`, `export_trial_balance.py`,
@@ -166,12 +189,21 @@ depends on: `lib_manager_api.py`, `export_trial_balance.py`,
 `audit_supplier_ap.py`, `cache_ap_ledger.py`, `find_orphaned_account_refs.py`
 — which don't touch MYOB at all and so live there instead, even though
 they support the same reconciliation work). **A host project reaches these
-via a symlink** (`project/scripts/<name>.py -> ../.claude/skills/<skill>/scripts/<name>.py`),
+via a symlink** (`project/scripts/<name>.py -> ../.claude/skills/<skill>/scripts/<name>.py`,
+or `project/scripts/<subdir>/<name>.py -> ../../.claude/skills/<skill>/scripts/<subdir>/<name>.py`
+for the two subdirectories, mirroring the project-side directory structure
+one level deeper),
 never a hand-copied duplicate — see manager-automation's SKILL.md "Agent
 habits" for why (a duplicate drifts silently). These skill copies locate
-the project root by searching upward from the current working directory
-(not from the file's own location, since it may be symlinked into any
-project) — always invoke with the project root as the working directory.
+the *project's* root by searching upward from the current working directory
+or via `Path.cwd()` (never from the file's own location, since it may be
+symlinked into any project) — always invoke with the project root as the
+working directory. Locating *sibling skill* modules (e.g.
+`lib_manager_api.py` in `manager-automation`) is different: those use
+`Path(__file__).resolve()`-based relative paths, since that correctly
+follows symlinks to each script's real, fixed location within the skills
+directory regardless of which project invokes it — see any `myob_delta/`
+script's header comment for the exact pattern.
 
 Project-specific tools that embed this company's own account codes, known
 transaction IDs, or bespoke matching logic (`fix_general_journal_gaps.py`,

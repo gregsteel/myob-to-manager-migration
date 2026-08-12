@@ -196,6 +196,26 @@ and [manager-import.md](manager-import.md) §3.
 Historical bills are harvested into `exports/myob/bills/by_bill/` via Playwright.
 See [receipts.md](receipts.md) and `scripts/myob_playwright/download_bills.py`.
 
+### Journal entries (Playwright, expanded layout — automatable)
+
+The manual process above (§2, "Journal entries MUST be exported in
+EXPANDED layout") can be automated instead of clicked through by hand:
+
+```bash
+python3 scripts/myob_playwright/download_journals.py --fy 2027
+# → exports/myob/journal_entries_FY2027.xlsx, same format build_journals.py
+#   already expects -- no changes needed there
+```
+
+Reuses the bills/invoices Playwright session. The click sequence this
+automates — and why each step matters (Customise's Apply only configures
+columns, a separate "Expand all" is the real collapsed/expanded toggle,
+Export reveals an Excel/PDF choice) — is documented in
+[delta-migration.md](delta-migration.md), which also covers the wider
+on-demand delta-migration pipeline (filter → apply Bills/Invoices → link
+Payments → apply standalone Journals) this harvester feeds into once
+MYOB is no longer the sole system of record (side-by-side operation, §7).
+
 ---
 
 ## 3a. Validate the export BEFORE building anything
@@ -533,11 +553,16 @@ exports/myob/       ← MYOB report exports (journals, TB, categories, contacts,
 exports/myob/bank/       ← Playwright bank transaction harvest (categorization)
 exports/myob/bills/      ← Playwright bill + receipt harvest
 exports/myob/invoices/   ← Playwright sales invoice harvest
+exports/myob/journal_entries_FY<n>.xlsx  ← Playwright journal harvest (download_journals.py) or manual export
 out/manager/        ← TSVs/CSV for Manager API apply / Batch + bank import
   by_year/          ← per-FY splits (journals, PI reopen, bank categorization)
 scripts/            ← ETL + reconciliation + Manager helpers (stdlib Python only)
+scripts/myob_playwright/ ← MYOB harvest (bills/invoices/journals), symlinked from the skill
+scripts/myob_delta/      ← on-demand delta migration pipeline, symlinked from the skill (see delta-migration.md)
+config/myob_business_id.txt, manager_business_name.txt, myob_tax_code_map.tsv, real_bank_accounts.tsv, last_migration_date.txt
+                    ← per-project config the delta-migration scripts read
 samples/            ← fake MYOB-shaped data for dry runs
 reconcile/          ← generated variance reports
 docs/               ← instance-only notes (this migration's diffs, payroll status)
-.cursor/skills/myob-to-manager-migration/  ← generic skill (reference/ + specs/)
+.claude/skills/myob-to-manager-migration/  ← generic skill (reference/ + specs/ + scripts/)
 ```
