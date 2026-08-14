@@ -66,9 +66,18 @@ def _load_bank_account_codes() -> set[str]:
 BANK_ACCOUNT_CODES = _load_bank_account_codes()
 
 # Transaction types already captured via apply_bills_invoices.py's PI/SI
-# pipeline (or, for Pay run/Supplier return applied, other existing
-# pipelines this project already has) -- see reference/runbook.md
-# "Recovering deferred non-bank journals" for the source of this list.
+# pipeline (or, for Supplier return applied, other existing pipelines this
+# project already has) -- see reference/runbook.md "Recovering deferred
+# non-bank journals" for the source of this list.
+#
+# "Pay run" is excluded from this filter for a DIFFERENT reason: nothing in
+# this project actually captures it automatically. It's excluded so it
+# doesn't get misfiled as a generic BAS/FBT/depreciation-style adjusting
+# journal by find_new_journals() below -- payroll needs its own hand-built
+# journal per pay run (manager-automation reference/payroll.md), and MYOB's
+# own `description` for these rows is the business's postal address, not a
+# real memo -- never copy it verbatim into a Manager Narration. See this
+# skill's SKILL.md "Hard-won MYOB-migration facts".
 CAPTURED_TXN_TYPES = {
     "Bill", "Invoice", "Sale", "Bill payment", "Pay run",
     "Supplier return applied", "Invoice payment", "Receive refund",

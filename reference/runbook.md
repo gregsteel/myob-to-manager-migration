@@ -392,7 +392,19 @@ Documented intentional differences (BAS Clearing, RE, bank statement truth, etc.
 it is already captured some other way (every "Purchase;"/"Sale;" description
 is MYOB's own internal echo of a Bill/Invoice already migrated via the PI/SI
 pipeline; every "Bill payment" is a director-advance-funded bill already
-handled by the AP-linking work; "Pay run" entries are payroll). The **blind
+handled by the AP-linking work). **"Pay run" entries are the one exception in
+this list — they are payroll, but nothing in this project auto-captures
+them; each migrates as a hand-built journal** (`manager-automation`'s
+[reference/payroll.md](../../manager-automation/reference/payroll.md): "past
+pay runs migrate as ordinary journals"). Excluding `txn_type == "Pay run"`
+below only means "don't re-surface it as a generic BAS/FBT/depreciation-style
+adjusting journal" — it does **not** mean it's already in Manager or that it's
+safe to skip. **Never copy a `Pay run` row's `description` column into the
+Manager Narration verbatim** — MYOB's Journal entries export gives every
+`Pay run` transaction the business's own postal address as its `description`,
+not a real memo (confirmed 2026-08-14, three pay runs, `journal_entries_FY2026.xlsx`).
+Build a real narration from the pay date and the journal's own Wages/PAYGW/
+Super lines instead. The **blind
 spot**: filtering only `txn_type == "General journal"` misses genuine
 deferred entries MYOB recorded as `Spend money`/`Receive money`/`Bill
 payment` with **no real bank-account line** (funded via Director Advances or
@@ -408,10 +420,13 @@ Working filter, in order:
 2. Drop any group whose codes include a real bank account (typically the
    operating account and any secondary savings/sweep account) — already
    covered by `build_bank_from_journals.py`.
-3. Drop `txn_type` of `Bill`, `Sale`, `Bill payment`, `Pay run`, `Supplier
+3. Drop `txn_type` of `Bill`, `Sale`, `Bill payment`, `Supplier
    return applied`, `Invoice payment`, `Receive refund` — all already
    captured via the PI/SI/AP-linking pipelines (spot-check a sample against
-   the live PI/SI before trusting this for a new business).
+   the live PI/SI before trusting this for a new business). Also drop
+   `Pay run` here — but track it separately as a manual to-do, **not** as
+   "already handled": see the narration warning above before creating any
+   of these in Manager.
 4. What's left is real: typically a cluster of BAS/FBT/depreciation/
    income-tax year-end adjustments per fiscal year, the "End of Year
    Adjustment" closing entries above, dividend reallocations, and a handful
