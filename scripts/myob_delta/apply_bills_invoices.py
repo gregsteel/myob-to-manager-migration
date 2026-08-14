@@ -24,9 +24,10 @@ side --
   - "GST" -> Manager "GST 10%" tax code.
   Any other MYOB tax code is *skipped* with a warning rather than guessed
   at -- extend TAX_CODE_MAP once you've confirmed the right Manager code.
-  Tax-coded lines always use AmountsIncludeTax=True with the tax-inclusive
-  unit price (manager-automation SKILL.md hard-won fact: an exclusive-price
-  + TaxCode combination can silently fail to add tax on top).
+  Tax-coded lines send the tax-INCLUSIVE unit price with a top-level (not
+  per-line) `AmountsIncludeTax: true` on the invoice payload -- see
+  build_purchase_invoice_payload's own comment for why per-line placement
+  is a silent no-op and top-level is the confirmed-working fix.
 
 Never creates anything dated after today's real date (Golden Rule, both
 skills' SKILL.md) -- flags and skips instead.
@@ -105,6 +106,7 @@ def _find_customer(api: API.ManagerAPI, name: str) -> str | None:
 
 def build_purchase_invoice_payload(bill: dict, coa: dict, tax_codes: dict, supplier_key: str) -> dict | None:
     lines = []
+    any_tax_coded = False
     for ln in bill["lines"]:
         code = ln.get("account_code")
         if code not in coa:
@@ -113,7 +115,6 @@ def build_purchase_invoice_payload(bill: dict, coa: dict, tax_codes: dict, suppl
         account_key = coa[code]
         tax_name = ln.get("tax_code")
         amt_inc = ln.get("amount_inc_tax")
-        amt_ex = ln.get("amount_ex_tax")
         if tax_name == "N-T" or (ln.get("tax_amount") or 0) == 0 and tax_name not in TAX_CODE_MAP:
             if tax_name not in ("N-T", None):
                 print(f"    [skip bill] unmapped tax_code {tax_name!r} on account {code} -- extend TAX_CODE_MAP")
@@ -122,43 +123,114 @@ def build_purchase_invoice_payload(bill: dict, coa: dict, tax_codes: dict, suppl
                 "Account": account_key,
                 "LineDescription": ln.get("description") or "",
                 "Qty": 1,
-                "PurchaseUnitPrice": amt_ex,
+                "PurchaseUnitPrice": amt_inc,
             })
         else:
             manager_tax_name = TAX_CODE_MAP.get(tax_name)
             if manager_tax_name is None or manager_tax_name not in tax_codes:
                 print(f"    [skip bill] unmapped tax_code {tax_name!r} on account {code} -- extend TAX_CODE_MAP")
                 return None
-            # CONFIRMED BUG (2026-08-12): AmountsIncludeTax:True does not
-            # persist on purchase-invoice-form POST (absent from the form on
-            # GET-back) -- Manager silently falls back to exclusive-tax
-            # behavior and adds the TaxCode's rate ON TOP of whatever price
-            # is given, regardless of the flag. Confirmed by direct
-            # GET-after-POST: a $62.39 tax-inclusive bill posted with
-            # PurchaseUnitPrice=62.39 + AmountsIncludeTax:True came back as
-            # a $68.63 invoice (62.39 * 1.1). Fix: always send the
-            # tax-EXCLUSIVE unit price and omit AmountsIncludeTax entirely
-            # -- that matches what Manager actually does or the total is
-            # silently 10% too high. See manager-automation SKILL.md's
-            # related (but distinct) AmountsIncludeTax:false hazard.
+            any_tax_coded = True
             lines.append({
                 "Account": account_key,
                 "LineDescription": ln.get("description") or "",
                 "Qty": 1,
-                "PurchaseUnitPrice": amt_ex,
+                "PurchaseUnitPrice": amt_inc,
                 "TaxCode": tax_codes[manager_tax_name],
             })
     reference = MI.pi_reference(bill["number"], bill["issue_date"])
-    return {
+    payload = {
         "IssueDate": bill["issue_date"],
         "Reference": reference,
         "Supplier": supplier_key,
         "Lines": lines,
     }
+    if any_tax_coded:
+        # AmountsIncludeTax is a whole-invoice flag, NOT a per-line one --
+        # it must sit at this top level of the payload. Placing it inside a
+        # Lines[] entry instead (the mistake in an earlier version of this
+        # script) is silently dropped: Manager falls back to exclusive-tax
+        # behavior and adds the TaxCode's rate ON TOP of the price given,
+        # confirmed 2026-08-12 to overstate a $62.39 bill as $68.63 that
+        # way. At the correct top level, confirmed working on both POST and
+        # PUT: sending the tax-INCLUSIVE unit price with
+        # AmountsIncludeTax:true here reproduces the source total exactly,
+        # including on the one bill (00001060) where re-deriving the total
+        # from amount_ex_tax + Manager's own tax-rounding landed 1 cent
+        # high because Manager and MYOB broke an exact rounding tie
+        # (8.675 -> 8.68 vs MYOB's 8.67) in opposite directions -- sending
+        # the already-rounded inclusive total sidesteps that entirely.
+        payload["AmountsIncludeTax"] = True
+    return payload
+
+
+def build_debit_note_payload(bill: dict, coa: dict, tax_codes: dict, supplier_key: str) -> dict | None:
+    """A negative-total MYOB bill (a supplier refund/credit, e.g. an
+    insurance policy adjustment) is a Debit Note in Manager, not a
+    Purchase Invoice with a negative total -- confirmed 2026-08-12 both by
+    direct instruction and by finding an existing record whose own
+    Description already read "... (credit note)" despite having been
+    created as an ordinary (negative) Purchase Invoice by an earlier
+    version of this pipeline.
+
+    Same line-building logic as build_purchase_invoice_payload (same
+    `debit-note-form` field names -- PurchaseUnitPrice, TaxCode,
+    top-level AmountsIncludeTax, confirmed identical via a disposable
+    test record), except every amount is sent as its **positive**
+    magnitude: a Debit Note's own document type already encodes the
+    AP-reducing direction, the way a Credit Note does on the AR side --
+    entering a negative amount on top of that would double the sign.
+    Confirmed against both real records: AAMI $-608.11 bill -> Debit Note
+    with lines +$552.83/+$55.28 posts as a live $608.11 Debit Note, not
+    -$608.11."""
+    lines = []
+    any_tax_coded = False
+    for ln in bill["lines"]:
+        code = ln.get("account_code")
+        if code not in coa:
+            print(f"    [skip line] unknown account code {code!r}")
+            return None
+        account_key = coa[code]
+        tax_name = ln.get("tax_code")
+        amt_inc = abs(ln.get("amount_inc_tax") or 0)
+        if tax_name == "N-T" or (ln.get("tax_amount") or 0) == 0 and tax_name not in TAX_CODE_MAP:
+            if tax_name not in ("N-T", None):
+                print(f"    [skip bill] unmapped tax_code {tax_name!r} on account {code} -- extend TAX_CODE_MAP")
+                return None
+            lines.append({
+                "Account": account_key,
+                "LineDescription": ln.get("description") or "",
+                "Qty": 1,
+                "PurchaseUnitPrice": amt_inc,
+            })
+        else:
+            manager_tax_name = TAX_CODE_MAP.get(tax_name)
+            if manager_tax_name is None or manager_tax_name not in tax_codes:
+                print(f"    [skip bill] unmapped tax_code {tax_name!r} on account {code} -- extend TAX_CODE_MAP")
+                return None
+            any_tax_coded = True
+            lines.append({
+                "Account": account_key,
+                "LineDescription": ln.get("description") or "",
+                "Qty": 1,
+                "PurchaseUnitPrice": amt_inc,
+                "TaxCode": tax_codes[manager_tax_name],
+            })
+    reference = MI.pi_reference(bill["number"], bill["issue_date"])
+    payload = {
+        "IssueDate": bill["issue_date"],
+        "Reference": reference,
+        "Supplier": supplier_key,
+        "Lines": lines,
+    }
+    if any_tax_coded:
+        payload["AmountsIncludeTax"] = True
+    return payload
 
 
 def build_sales_invoice_payload(inv: dict, coa: dict, tax_codes: dict, customer_key: str) -> dict | None:
     lines = []
+    any_tax_coded = False
     for ln in inv["lines"]:
         code = ln.get("account_code")
         if code not in coa:
@@ -167,7 +239,6 @@ def build_sales_invoice_payload(inv: dict, coa: dict, tax_codes: dict, customer_
         account_key = coa[code]
         tax_name = ln.get("tax_code")
         amt_inc = ln.get("amount_inc_tax")
-        amt_ex = ln.get("amount_ex_tax")
         if tax_name == "N-T" or (ln.get("tax_amount") or 0) == 0 and tax_name not in TAX_CODE_MAP:
             if tax_name not in ("N-T", None):
                 print(f"    [skip invoice] unmapped tax_code {tax_name!r} on account {code} -- extend TAX_CODE_MAP")
@@ -176,31 +247,35 @@ def build_sales_invoice_payload(inv: dict, coa: dict, tax_codes: dict, customer_
                 "Account": account_key,
                 "LineDescription": ln.get("description") or "",
                 "Qty": 1,
-                "SalesUnitPrice": amt_ex,
+                "SalesUnitPrice": amt_inc,
             })
         else:
             manager_tax_name = TAX_CODE_MAP.get(tax_name)
             if manager_tax_name is None or manager_tax_name not in tax_codes:
                 print(f"    [skip invoice] unmapped tax_code {tax_name!r} on account {code} -- extend TAX_CODE_MAP")
                 return None
-            # Same confirmed bug as build_purchase_invoice_payload -- see its
-            # comment. Send the tax-exclusive price, omit AmountsIncludeTax.
+            any_tax_coded = True
             lines.append({
                 "Account": account_key,
                 "LineDescription": ln.get("description") or "",
                 "Qty": 1,
-                "SalesUnitPrice": amt_ex,
+                "SalesUnitPrice": amt_inc,
                 "TaxCode": tax_codes[manager_tax_name],
             })
     # Sales Invoice Reference convention: verbatim MYOB number, no date suffix
     # (confirmed zero collisions across the full harvested invoice history --
     # see manager_index.check_si_collisions()). Unlike bills, no -YYYYMMDD needed.
-    return {
+    payload = {
         "IssueDate": inv["issue_date"],
         "Reference": inv["number"],
         "Customer": customer_key,
         "Lines": lines,
     }
+    if any_tax_coded:
+        # See build_purchase_invoice_payload's comment -- same top-level
+        # (not per-line) AmountsIncludeTax placement, same confirmed fix.
+        payload["AmountsIncludeTax"] = True
+    return payload
 
 
 def apply_bills(api: API.ManagerAPI, idx: dict, rows: list[dict], *, apply: bool, only: set[str] | None) -> None:
@@ -229,6 +304,9 @@ def apply_bills(api: API.ManagerAPI, idx: dict, rows: list[dict], *, apply: bool
         if m["purchase"] is not None:
             print(f"[skip] {bn}: already exists in Manager as {m['purchase']['reference']}")
             continue
+        if m["debit_note"] is not None:
+            print(f"[skip] {bn}: already exists in Manager as Debit Note {m['debit_note']['reference']}")
+            continue
 
         supplier_name = bill["supplier"]["name"]
         if supplier_name not in supplier_cache:
@@ -238,7 +316,15 @@ def apply_bills(api: API.ManagerAPI, idx: dict, rows: list[dict], *, apply: bool
             print(f"[skip] {bn}: no Manager Supplier found named {supplier_name!r} -- create it first")
             continue
 
-        payload = build_purchase_invoice_payload(bill, coa, tax_codes, supplier_key)
+        # A negative-total bill (supplier refund/credit) is a Debit Note,
+        # not a Purchase Invoice with a negative total -- see
+        # build_debit_note_payload's docstring.
+        is_debit_note = bill["totals"]["total_inc_tax"] < 0
+        entity = "debit-note" if is_debit_note else "purchase"
+        list_path, list_key = ("/debit-notes", "debitNotes") if is_debit_note else ("/purchase-invoices", "purchaseInvoices")
+        builder = build_debit_note_payload if is_debit_note else build_purchase_invoice_payload
+
+        payload = builder(bill, coa, tax_codes, supplier_key)
         if payload is None:
             print(f"[skip] {bn}: could not build a full line set (see above)")
             continue
@@ -247,7 +333,8 @@ def apply_bills(api: API.ManagerAPI, idx: dict, rows: list[dict], *, apply: bool
             (l.get("PurchaseUnitPrice") or 0) * l.get("Qty", 1)
             for l in payload["Lines"]
         )
-        print(f"{'[APPLY]' if apply else '[DRY-RUN]'} {bn}  {bill['issue_date']}  "
+        tag = " [DEBIT NOTE]" if is_debit_note else ""
+        print(f"{'[APPLY]' if apply else '[DRY-RUN]'} {bn}{tag}  {bill['issue_date']}  "
               f"{supplier_name}  ref={payload['Reference']}  "
               f"lines={len(payload['Lines'])}  total=${total:,.2f}")
         for l in payload["Lines"]:
@@ -255,12 +342,13 @@ def apply_bills(api: API.ManagerAPI, idx: dict, rows: list[dict], *, apply: bool
             print(f"           {l['LineDescription'][:40]:40s} ${l['PurchaseUnitPrice']:>10,.2f}  tax={tc}")
 
         if apply:
-            pi = api.post_form("purchase", payload)
-            key = pi.get("key") or pi.get("Key")
-            live = api.get("/purchase-invoices", pageSize=1, term=payload["Reference"])
-            live_amount = live["purchaseInvoices"][0]["invoiceAmount"]["value"]
-            expected = bill["totals"]["total_inc_tax"]
-            ok = abs(live_amount - expected) < 0.01
+            rec = api.post_form(entity, payload)
+            key = rec.get("key") or rec.get("Key")
+            live = api.get(list_path, pageSize=1, term=payload["Reference"])
+            live_row = next((r for r in live[list_key] if r.get("key") == key), live[list_key][0])
+            live_amount = (live_row.get("invoiceAmount") or live_row.get("amount") or {}).get("value")
+            expected = abs(bill["totals"]["total_inc_tax"]) if is_debit_note else bill["totals"]["total_inc_tax"]
+            ok = live_amount is not None and abs(live_amount - expected) < 0.01
             print(f"           -> created key={key}  live_amount=${live_amount:,.2f}  "
                   f"expected=${expected:,.2f}  {'OK' if ok else '*** MISMATCH ***'}")
 

@@ -218,6 +218,82 @@ def cmd_login(args: argparse.Namespace) -> None:
         browser.close()
 
 
+def _totp(secret: str, digits: int = 6, period: int = 30) -> str:
+    """RFC 6238 TOTP, stdlib only (see manager-automation/myob-to-manager-
+    migration's own "Python stdlib only" convention -- no need for a new
+    dependency just for this)."""
+    import base64
+    import hashlib
+    import hmac
+    import struct
+    import time as _time
+
+    key = base64.b32decode(secret.upper().replace(" ", ""), casefold=True)
+    counter = int(_time.time() // period)
+    msg = struct.pack(">Q", counter)
+    h = hmac.new(key, msg, hashlib.sha1).digest()
+    offset = h[-1] & 0x0F
+    code = (struct.unpack(">I", h[offset:offset + 4])[0] & 0x7FFFFFFF) % (10 ** digits)
+    return str(code).zfill(digits)
+
+
+def cmd_login_auto(args: argparse.Namespace) -> None:
+    """Non-interactive login using MYOB_USERNAME/MYOB_PASSWORD/MYOB_TOTP_SECRET
+    from the environment (source project .env first). Confirmed working
+    2026-08-14 against this business's real Auth0-style universal login
+    (id.myob.com) -- three real steps (email -> password -> TOTP), landing
+    directly on this business's own dashboard (URL contains BUSINESS_ID)
+    with no separate business-picker step observed for a single-business
+    account. Only use this for read-only harvesting/export tasks -- it logs
+    in with real credentials, so treat it with the same care as any other
+    live-credential automation (never print the secret values, never persist
+    them anywhere but the caller's own .env)."""
+    import os
+
+    from playwright.sync_api import sync_playwright
+
+    username = os.environ.get("MYOB_USERNAME")
+    password = os.environ.get("MYOB_PASSWORD")
+    totp_secret = os.environ.get("MYOB_TOTP_SECRET")
+    missing = [n for n, v in [("MYOB_USERNAME", username), ("MYOB_PASSWORD", password),
+                               ("MYOB_TOTP_SECRET", totp_secret)] if not v]
+    if missing:
+        raise SystemExit(f"[error] missing env var(s): {', '.join(missing)} -- "
+                          "add to .env and `source` it first, or use `login` for "
+                          "interactive login instead")
+
+    _ensure_dirs()
+    with sync_playwright() as p:
+        browser = _browser(p, headless=not args.headed)
+        context = browser.new_context(accept_downloads=True, viewport={"width": 1400, "height": 900})
+        page = context.new_page()
+
+        page.goto(START_URL, wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(2000)
+        page.locator("#username").fill(username)
+        page.get_by_role("button", name="Sign in with password").click()
+        page.wait_for_timeout(2000)
+        page.locator("input[type='password']").first.fill(password)
+        page.get_by_role("button", name="Sign in", exact=True).click()
+        page.wait_for_timeout(3000)
+        if "mfa-otp-challenge" in page.url:
+            code = _totp(totp_secret)
+            otp_input = page.locator("input[type='text'], input[inputmode='numeric'], input[type='tel']").first
+            otp_input.fill(code)
+            page.get_by_role("button", name="Continue").click()
+            page.wait_for_timeout(3500)
+
+        if "app.myob.com" not in page.url:
+            shot = STATE_DIR / "login_auto_debug.png"
+            page.screenshot(path=str(shot))
+            raise SystemExit(f"[error] login didn't land on app.myob.com -- url={page.url}, "
+                              f"screenshot saved to {shot}")
+
+        context.storage_state(path=str(STORAGE))
+        print(f"[ok] logged in and saved session → {STORAGE} ({page.url})")
+        browser.close()
+
+
 def cmd_probe(args: argparse.Namespace) -> None:
     from playwright.sync_api import sync_playwright
 
@@ -1128,6 +1204,11 @@ def main() -> None:
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("login", help="Interactive login; save session").set_defaults(func=cmd_login)
+    p_login_auto = sub.add_parser(
+        "login-auto",
+        help="Non-interactive login using MYOB_USERNAME/MYOB_PASSWORD/MYOB_TOTP_SECRET from env")
+    p_login_auto.add_argument("--headed", action="store_true", help="show the browser window (debugging)")
+    p_login_auto.set_defaults(func=cmd_login_auto)
     sub.add_parser("probe", help="Dump bill links on Bills page").set_defaults(func=cmd_probe)
     sub.add_parser("reset", help="Reset statuses and delete bill folders").set_defaults(func=cmd_reset)
 

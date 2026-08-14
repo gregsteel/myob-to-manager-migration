@@ -60,9 +60,101 @@ def fetch_manager_transactions(api: API.ManagerAPI, code: str) -> list[dict]:
     ]
 
 
+def fetch_manager_bank_transactions(api: API.ManagerAPI, code: str) -> list[dict]:
+    """For a Bank-and-Cash-Account code (e.g. "1-1110"), NOT a chart-of-accounts
+    code. `/transactions?term=<code>` returns zero rows for these -- confirmed
+    2026-08-13, bank accounts are a separate object type the endpoint's term
+    search doesn't index at all, even though the account visibly has
+    thousands of real transactions in the Manager UI. The real source is
+    every Payment/Receipt whose own `paidFrom`/`receivedIn` matches this
+    account -- list-level fields already carry it (Payment: bare string
+    "1-1110 - Lilith Bank Account"; Receipt: {"key":..., "name": "1-1110 - ..."}
+    -- inconsistent shapes between the two, handled explicitly below), so
+    this is two cheap list_all() calls, no per-record get_form needed.
+    Sign convention matches the ledger's own (a Payment reduces the bank
+    balance, so its amount is negated; a Receipt increases it, kept as-is).
+
+    **Also must include `inter-account-transfer`** -- a transfer between two
+    Manager Bank-and-Cash-Accounts is its own document type, not a Payment
+    or Receipt at all (confirmed 2026-08-13 the hard way: the first version
+    of this function, without this, produced a "Manager total" $8,390.77
+    short on one bank account and $8,390.77 over on the other -- the exact
+    size of one real transfer between them, silently omitted from both
+    sides' calculated totals even though the live Manager UI plainly showed
+    the correct actual balance). Each transfer names both accounts by bare
+    string on `paidFrom`/`receivedIn` (no dict-wrapping quirk here, unlike
+    Payment vs Receipt above) with one unsigned `amount` -- sign it
+    negative when this code is the `paidFrom` side, positive when it's
+    `receivedIn`."""
+    out = []
+    for p in api.list_all("payment"):
+        paid_from = p.get("paidFrom") or ""
+        if isinstance(paid_from, dict):
+            paid_from = paid_from.get("name") or ""
+        if paid_from.startswith(code):
+            out.append({"date": p["date"], "type": "Payment", "reference": "",
+                        "detail": p.get("description") or "", "amount": -(p.get("amount") or {}).get("value", 0.0)})
+    for r in api.list_all("receipt"):
+        received_in = r.get("receivedIn") or ""
+        if isinstance(received_in, dict):
+            received_in = received_in.get("name") or ""
+        if received_in.startswith(code):
+            out.append({"date": r["date"], "type": "Receipt", "reference": "",
+                        "detail": r.get("description") or "", "amount": (r.get("amount") or {}).get("value", 0.0)})
+    for t in api.list_all("inter-account-transfer"):
+        amount = (t.get("amount") or {}).get("value", 0.0)
+        detail = t.get("description") or ""
+        if (t.get("paidFrom") or "").startswith(code):
+            out.append({"date": t["date"], "type": "Transfer out", "reference": "",
+                        "detail": detail, "amount": -amount})
+        if (t.get("receivedIn") or "").startswith(code):
+            out.append({"date": t["date"], "type": "Transfer in", "reference": "",
+                        "detail": detail, "amount": amount})
+    return out
+
+
 def dmy_to_iso(d: str) -> str:
     day, month, year = d.split("/")
     return f"{year}-{month}-{day}"
+
+
+def parse_myob_bank_transactions(code: str) -> list[dict]:
+    """Every raw MYOB bank-feed line for a Bank-and-Cash-Account code, from
+    `exports/myob/bank/_index.tsv` (see myob_playwright/download_bank.py).
+    **Not the same population as `parse_myob_journals`**: the journal
+    export only contains transactions MYOB has already categorized/posted
+    -- a bank line MYOB itself hasn't matched to anything yet genuinely
+    exists on both sides but would never appear there, manufacturing a
+    false "Manager-only" gap (confirmed 2026-08-13 on a real $173.00
+    transaction). This reads MYOB's own bank feed directly instead, which
+    carries the real `status` field ("Approved" vs "Unmatched") -- rows
+    get an extra `myob_status` key so a caller can tag/exclude unmatched
+    ones rather than silently miscounting them as a discrepancy.
+
+    Only covers whatever date range download_bank.py was last run for --
+    check the file's own coverage before trusting an "opening balance"
+    calculation from this alone; pair with parse_myob_journals for
+    anything before the harvested window."""
+    path = MYOB_DIR / "bank" / "_index.tsv"
+    if not path.is_file():
+        return []
+    out = []
+    with path.open(newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f, delimiter="\t"):
+            if row.get("account_code") != code:
+                continue
+            withdrawal = float(row["withdrawal"]) if row.get("withdrawal") else 0.0
+            deposit = float(row["deposit"]) if row.get("deposit") else 0.0
+            amount = deposit - withdrawal  # bank-ledger sign: deposit positive, withdrawal negative
+            status = row.get("status", "")
+            detail = row.get("description", "")
+            if status != "Approved":
+                detail = f"[MYOB: not yet matched] {detail}"
+            out.append({
+                "date": row["date"], "type": "Bank transaction", "reference": row.get("matched_ref", ""),
+                "detail": detail, "amount": round(amount, 2), "myob_status": status,
+            })
+    return out
 
 
 def parse_myob_journals(code: str) -> list[dict]:

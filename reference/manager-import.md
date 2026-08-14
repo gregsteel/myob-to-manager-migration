@@ -216,6 +216,14 @@ python3 scripts/attach_purchase_images.py           # JPEG into Images table
   sum against the source's own tax-inclusive total after any batch, and
   check other document types (Receipts/Payments) for the same risk before
   assuming they're unaffected.
+  **`AmountsIncludeTax` is a whole-invoice field — it must sit at the top
+  level of the payload, a sibling of `Lines`, not nested inside a
+  `Lines[]` entry.** A later rewrite of this pattern placed it per-line
+  instead and it was silently dropped there (confirmed via GET-after-POST:
+  a $62.39 tax-inclusive bill posted that way came back as $68.63, tax
+  added on top instead of backed out) — see `myob-to-manager-migration`'s
+  [reference/delta-migration.md](delta-migration.md#resolved-amountsincludetax-must-be-top-level-on-the-payload-not-per-line)
+  for the full incident and confirmed-correct payload shape.
 
 ---
 
@@ -482,7 +490,7 @@ never by pasting the full journal file.
    ```
    Reads `out/manager/journal_dictionary.tsv` + live `.manager`, writes
    `reconcile/{slug}_alignment.tsv`, `_bridge.tsv`, `_residual.tsv`.
-   Intentional remediations live in `config/intentional_exceptions.tsv`.
+   Intentional remediations live in `config/myob_migration_diffs.tsv`.
    **Sign-off:** `Untagged_residual ≈ 0` and no `MISSING_*` in residual
    (only `INTENTIONAL_*` / documented `GAP_*` may remain).
    Do **not** paste the full journal dictionary.

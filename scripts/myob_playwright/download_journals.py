@@ -132,13 +132,46 @@ def cmd_download(args: argparse.Namespace) -> None:
         page.wait_for_timeout(2000)
         print("[ok] expanded view active")
 
-        page.get_by_text(re.compile(r"^Export$", re.I)).first.click(timeout=8000)
-        page.wait_for_timeout(1200)
-        excel_opt = page.get_by_text(re.compile(r"^Excel$", re.I))
-        if not excel_opt.count():
-            raise SystemExit("[error] no Excel export option found")
-        with page.expect_download(timeout=20000) as di:
-            excel_opt.first.click(timeout=8000)
+        # For a report too large to fully "Expand all" on screen (e.g. a
+        # 13+ month range), clicking "Expand all" itself immediately opens
+        # a confirmation <dialog> -- "Do you want to export this report?
+        # The report size for the selected time frame is too large to
+        # expand all lines. Do you want to export the detailed view
+        # instead?" -- with a pre-selected "Export to Excel" radio and its
+        # own Cancel/Export buttons. Confirmed 2026-08-14: this dialog
+        # stays open and covers the page, so it must be checked for RIGHT
+        # HERE, before ever touching the toolbar's own separate "Export"
+        # button -- clicking that button while this dialog is still open
+        # just gets blocked by it (an earlier version of this script tried
+        # clicking the toolbar Export first and got stuck in exactly that
+        # loop). An ordinary-sized report never shows this dialog; there
+        # the toolbar "Export" button reveals a plain Excel/PDF text menu
+        # directly (confirmed 2026-08-12, see module docstring). Screenshot
+        # + visible-page-text capture on total failure so a repeat doesn't
+        # cost another fragile MYOB login round trip just to see what
+        # state the page is actually in.
+        large_report_dialog = page.locator("dialog[open]").filter(
+            has=page.get_by_text(re.compile(r"too large to expand", re.I))
+        )
+        if large_report_dialog.count():
+            print("[info] large report -- using detailed-view export dialog")
+            with page.expect_download(timeout=30000) as di:
+                large_report_dialog.get_by_role("button", name="Export", exact=True).click(timeout=8000)
+        else:
+            page.get_by_text(re.compile(r"^Export$", re.I)).first.click(timeout=8000)
+            page.wait_for_timeout(1500)
+            excel_opt = page.get_by_text(re.compile(r"^Excel$", re.I))
+            if excel_opt.count():
+                with page.expect_download(timeout=20000) as di:
+                    excel_opt.first.click(timeout=8000)
+            else:
+                shot_path = out_path.parent / "export_menu_debug.png"
+                page.screenshot(path=str(shot_path))
+                visible_text = page.locator("body").inner_text()[:2000]
+                raise SystemExit(
+                    f"[error] neither the Excel menu nor the large-report dialog appeared -- "
+                    f"screenshot saved to {shot_path}\nvisible page text:\n{visible_text}"
+                )
         download = di.value
         download.save_as(out_path)
         print(f"[ok] saved -> {out_path}")

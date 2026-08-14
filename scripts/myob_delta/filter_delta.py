@@ -105,7 +105,7 @@ def find_new_bills(idx: dict, after_date: str) -> list[dict]:
     new = []
     for row in candidate_bill_rows(after_date):
         m = MI.match_bill(idx, bill_number=row["bill_number"], issue_date=row["issue_date"])
-        if m["purchase"] is None:
+        if m["purchase"] is None and m["debit_note"] is None:
             new.append(row)
     return new
 

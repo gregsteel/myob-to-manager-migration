@@ -86,7 +86,8 @@ def pi_reference(bill_number: str, issue_date) -> str:
 
 
 def build_index(api: API.ManagerAPI | None = None) -> dict:
-    """Live snapshot of Manager Purchase/Sales Invoices, keyed by Reference."""
+    """Live snapshot of Manager Purchase/Sales Invoices + Debit Notes, keyed
+    by Reference."""
     api = api or API.ManagerAPI()
     pis = api.list_all("purchase-invoice")
     sis = api.list_all("sales-invoice")
@@ -94,7 +95,30 @@ def build_index(api: API.ManagerAPI | None = None) -> dict:
         "api": api,
         "pi_by_ref": {p["reference"]: p for p in pis if p.get("reference")},
         "si_by_ref": {s["reference"]: s for s in sis if s.get("reference")},
+        "dn_by_ref": _build_dn_index(api),
     }
+
+
+def _build_dn_index(api: API.ManagerAPI) -> dict[str, dict]:
+    """Reference -> Debit Note summary. Unlike purchase-invoices/sales-invoices,
+    the debit-notes list endpoint does NOT expose `reference` on its rows
+    (confirmed 2026-08-12 -- only key/date/supplier/description/amount) --
+    a per-record get_form is required to read it. Fine at this document
+    type's expected volume (negative-total bills are rare; this is not the
+    thousands-of-records case purchase-invoice/sales-invoice dedup has to
+    handle cheaply)."""
+    out: dict[str, dict] = {}
+    for d in api.list_all("debit-note"):
+        form = api.get_form("debit-note", d["key"])
+        ref = form.get("Reference")
+        if ref:
+            out[ref] = {
+                "key": d["key"],
+                "reference": ref,
+                "date": d.get("date"),
+                "amount": (d.get("amount") or {}).get("value"),
+            }
+    return out
 
 
 def _invoice_summary(rec: dict, method: str) -> dict:
@@ -121,20 +145,23 @@ def match_bill(
     supplier_name: str | None = None,
     payments: list[dict] | None = None,
 ) -> dict:
-    """Does this MYOB bill already exist in Manager as a Purchase Invoice?
+    """Does this MYOB bill already exist in Manager as a Purchase Invoice or
+    a Debit Note? (Negative-total bills are created as Debit Notes, not
+    Purchase Invoices -- see apply_bills_invoices.py.)
 
     Returns the same top-level shape the original module returned
-    (`purchase` / `payments` / `matched_journals`) so `download_bills.py`
-    doesn't need changes -- but `payments`/`matched_journals` are no longer
-    individually fuzzy-matched (that was informational detail for the old
-    workflow, not needed for dedup + already-paid detection, both of which
-    come straight off the Purchase Invoice's own `balanceDue`).
+    (`purchase` / `payments` / `matched_journals`), plus `debit_note`, so
+    `download_bills.py` doesn't need changes -- but `payments`/`matched_journals`
+    are no longer individually fuzzy-matched (that was informational detail
+    for the old workflow, not needed for dedup + already-paid detection,
+    both of which come straight off the Purchase Invoice's own `balanceDue`).
     """
     ref = pi_reference(bill_number, issue_date)
     pi = index["pi_by_ref"].get(ref)
     purchase = _invoice_summary(pi, "reference_exact") if pi else None
+    debit_note = index["dn_by_ref"].get(ref)
     matched_journals = [{**purchase, "link": "purchase"}] if purchase else []
-    return {"purchase": purchase, "payments": [], "matched_journals": matched_journals}
+    return {"purchase": purchase, "debit_note": debit_note, "payments": [], "matched_journals": matched_journals}
 
 
 def match_invoice(index: dict, *, number: str, issue_date=None) -> dict:
