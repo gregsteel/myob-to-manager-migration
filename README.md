@@ -82,17 +82,10 @@ literal script.
 - **[`manager-automation`](https://github.com/gregsteel/manager-automation)**
   — durable, reusable knowledge and tools for automating **Manager.io
   itself** — its REST API's real behavior, quirks, and safe-operation practices
-- **[`manager-mcp`](https://github.com/flumpiey/manager-mcp)** — scoped
-  MCP server for routine, human-initiated, single-transaction bookkeeping
-  (record a payment, issue an invoice). Preferred over hand-rolled API
-  calls for that case; not a substitute for anything here touching its
-  denylist (COA, tax codes) or bulk/scripted operations. Set up on demand
-  per task, torn down after — see `SKILL.md` "Complementary tool".
 - **[`mprokopov/manager-ai-skills`](https://github.com/mprokopov/manager-ai-skills)**
   (`manager-accounting` skill/CLI) — quick reads and spot-checks (aged
   receivables, GUID lookups). Not a dependency of this repo, but commonly
-  used alongside it; don't confuse it with `manager-mcp`'s own
-  same-named skill.
+  used alongside it.
 
 ## Scope
 
