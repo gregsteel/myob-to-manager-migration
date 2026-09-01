@@ -22,6 +22,13 @@ side --
     shape already in Manager (TaxCode: null, confirmed by direct read).
   - "FRE" -> Manager "GST Free" tax code.
   - "GST" -> Manager "GST 10%" tax code.
+  - "GNR" ("GST for Non-Registered purchases") should also map to Manager
+    "GST Free" in config/myob_tax_code_map.tsv if this business uses it --
+    functionally the same as FRE (no input tax credit, still belongs in
+    G11), just a differently-named MYOB code. Left unmapped it hits the
+    skip-with-warning path below, which is safe but will under-report G11
+    if never revisited -- see reference/tax-code-bas-visibility.md before
+    assuming an unmapped GNR line is an oversight or guessing at it.
   Any other MYOB tax code is *skipped* with a warning rather than guessed
   at -- extend TAX_CODE_MAP once you've confirmed the right Manager code.
   Tax-coded lines send the tax-INCLUSIVE unit price with a top-level (not

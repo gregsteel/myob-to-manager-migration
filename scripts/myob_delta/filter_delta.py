@@ -74,10 +74,55 @@ BANK_ACCOUNT_CODES = _load_bank_account_codes()
 # this project actually captures it automatically. It's excluded so it
 # doesn't get misfiled as a generic BAS/FBT/depreciation-style adjusting
 # journal by find_new_journals() below -- payroll needs its own hand-built
-# journal per pay run (manager-automation reference/payroll.md), and MYOB's
+# entry per pay run (manager-automation reference/payroll.md), and MYOB's
 # own `description` for these rows is the business's postal address, not a
 # real memo -- never copy it verbatim into a Manager Narration. See this
 # skill's SKILL.md "Hard-won MYOB-migration facts".
+#
+# That hand-built entry is NOT always a plain journal, and which MYOB
+# clearing pattern a "Pay run" row used does NOT decide whether it needs a
+# Payslip -- only whether the *original booking* was dollar-correct. Check
+# which account each row credits for net pay:
+#   - Pattern 1 (pre-STP): the real bank account directly, no clearing leg
+#     at all. Dollar-correct and self-contained as migrated (an ordinary
+#     journal/Payment is not WRONG) -- but it never touches Manager's
+#     builtin Employee clearing account, so it produces no Payslip and no
+#     per-employee data.
+#   - Pattern 2 (post-STP electronic payment): credits MYOB's Electronic
+#     Clearing Account (often coded 1-3000, an Asset -- an ABA-file parking
+#     lot), then a second same-day-or-later transaction clears it to the
+#     real bank. Migrating the accrual leg as a journal against whatever
+#     account 1-3000 was seeded to is wrong regardless of pattern -- that
+#     account is a chart lookalike, not the builtin control, and can never
+#     populate per-employee Payslip balances.
+# Detection is which account was credited, not a date -- the switchover is
+# specific to when each business adopted electronic/STP payment (confirmed
+# real case: Lilith Pty Ltd switched 13/05/2024) and isn't portable across
+# clients.
+#
+# If the target Manager instance uses native Payslips at all, BOTH patterns
+# need the same correction, not just Pattern 2: build a native Manager
+# Payslip per pay run (per-item mapping for Wages/PAYGW/Super, net pay to
+# the builtin Employee clearing account), then repoint the linked bank
+# Payment (whatever account it actually used) to Employee clearing for the
+# same net amount. Don't delete an accrual-side journal that's already
+# right except for the account -- reverse it dated the same historical day
+# instead (P&L nets to zero, Balance Sheet was already flat by cycle end),
+# especially when the tooling in use can't delete records.
+#
+# Known API limitation: Manager's Payment write endpoint has no employee-tag
+# field on payment lines (only Account/Amount/Description/LineDescription/
+# AccountsPayable*), even when Account is the builtin Employee clearing
+# control -- so a Payment retrofitted via this API lands on the control
+# account untagged to any employee (same "Suspense" failure shape as
+# untagged builtin AR/AP). A Payslip's own net-pay credit is tagged
+# automatically; the Payment side is not. Don't assume a scripted fix here
+# achieves full per-employee fidelity -- check in the Manager UI whether the
+# tag can be added manually.
+#
+# See SKILL.md's Electronic Clearing Account note and
+# manager-automation/reference/payroll.md "Employee clearing account" /
+# "Migration impact".
 CAPTURED_TXN_TYPES = {
     "Bill", "Invoice", "Sale", "Bill payment", "Pay run",
     "Supplier return applied", "Invoice payment", "Receive refund",

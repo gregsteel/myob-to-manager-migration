@@ -394,17 +394,46 @@ is MYOB's own internal echo of a Bill/Invoice already migrated via the PI/SI
 pipeline; every "Bill payment" is a director-advance-funded bill already
 handled by the AP-linking work). **"Pay run" entries are the one exception in
 this list — they are payroll, but nothing in this project auto-captures
-them; each migrates as a hand-built journal** (`manager-automation`'s
-[reference/payroll.md](../../manager-automation/reference/payroll.md): "past
-pay runs migrate as ordinary journals"). Excluding `txn_type == "Pay run"`
+them; each migrates as a hand-built entry.** Excluding `txn_type == "Pay run"`
 below only means "don't re-surface it as a generic BAS/FBT/depreciation-style
 adjusting journal" — it does **not** mean it's already in Manager or that it's
-safe to skip. **Never copy a `Pay run` row's `description` column into the
-Manager Narration verbatim** — MYOB's Journal entries export gives every
-`Pay run` transaction the business's own postal address as its `description`,
-not a real memo (confirmed 2026-08-14, three pay runs, `journal_entries_FY2026.xlsx`).
-Build a real narration from the pay date and the journal's own Wages/PAYGW/
-Super lines instead. The **blind
+safe to skip, and it does **not** mean every one of them should be a plain
+journal. **Check which account each row credits for net pay** — this
+decides whether the *original booking* was dollar-correct, not whether a
+Payslip retrofit is needed (see below): credited to the real bank account
+directly (Pattern 1, pre-STP, no clearing leg) → the dollar figures are
+correct as migrated. Credited to MYOB's Electronic Clearing Account (often
+`1-3000`; Pattern 2, post-STP/batched electronic payment) → migrating the
+accrual leg as a journal against whatever chart account that code was
+seeded to is wrong regardless of pattern; see SKILL.md's Electronic
+Clearing Account note and `manager-automation`'s
+[reference/payroll.md](../../manager-automation/reference/payroll.md)
+"Employee clearing account" section. Detection is which account was
+credited, not a date — the switchover is client-specific (confirmed real
+case: Lilith Pty Ltd switched from bank-direct to Electronic-Clearing-
+Account pay-run journaling on 13/05/2024, coinciding with STP-based
+electronic payment).
+
+**If the target Manager instance uses native Payslips at all, both
+patterns need the same retrofit** — Pattern 1's dollar-correct booking
+still never touches the builtin Employee clearing account, so it produces
+no Payslip history and no per-employee data. For every historical pay run:
+(1) build a native Manager Payslip with its exact figures via the existing
+Payslip Items; (2) repoint the linked bank Payment (whatever account it
+actually used) to the builtin Employee clearing account for the same net
+amount; (3) don't delete an accrual-side journal that's already correct
+except for the account — reverse it dated the same historical day instead,
+especially when the tooling in use can't delete records. Manager's Payment
+write endpoint has no employee-tag field on payment lines, so a Payment
+retrofitted via the API lands on the Employee clearing control untagged to
+any employee (same "Suspense" risk as untagged builtin AR/AP) — verify in
+the Manager UI whether the tag can be added manually before treating an
+API-only fix as complete. **Never copy a `Pay run` row's
+`description` column into the Manager Narration verbatim** — MYOB's Journal
+entries export gives every `Pay run` transaction the business's own postal
+address as its `description`, not a real memo (confirmed 2026-08-14, three
+pay runs, `journal_entries_FY2026.xlsx`). Build a real narration from the
+pay date and the journal's own Wages/PAYGW/Super lines instead. The **blind
 spot**: filtering only `txn_type == "General journal"` misses genuine
 deferred entries MYOB recorded as `Spend money`/`Receive money`/`Bill
 payment` with **no real bank-account line** (funded via Director Advances or
@@ -531,8 +560,22 @@ capability. See [payroll.md](../../manager-automation/reference/payroll.md) for 
 for the Australian specifics (STP, Payday Super, low-cost lodgement
 tools).
 
-**History is unaffected** — past pay runs migrate as ordinary journals
-like everything else. Only the forward process needs solving.
+**"History is unaffected" is only true if native Manager Payslips are
+never going to be used.** In that case, pay runs the old system paid
+straight from the real bank account migrate fine as ordinary journals,
+and pay runs routed through its own clearing/suspense account (e.g.
+MYOB's Electronic Clearing Account, `1-3000`) just need reclassifying to
+an ordinary wages-payable liability — see "Recovering deferred non-bank
+journals" above and SKILL.md's Electronic Clearing Account note.
+
+**If native Payslips are (or might be) used going forward, history is
+never fully unaffected** — every historical pay run, including the
+dollar-correct bank-direct ones, needs the Payslip-plus-repointed-Payment
+retrofit described above to get per-employee data and Payslip history.
+Check which account each historical pay run credited for net pay to know
+whether its *original booking* was correct, not to decide whether it
+needs the retrofit. Only the forward process (post-cutover pay runs) is
+guaranteed to need solving regardless of history.
 
 **Do not cancel the old system until payroll lodgement is resolved**,
 however well the ledger reconciles.
